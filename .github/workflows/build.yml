@@ -5,7 +5,13 @@ on:
     branches:
       - main
 
+    tags:
+      - "v*"
+
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -35,7 +41,7 @@ jobs:
             --name "Steam Emulator Setup" `
             main.py
 
-      - name: Prepare release package
+      - name: Prepare package
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "release"
@@ -78,3 +84,12 @@ jobs:
           name: Steam-Emulator-Setup-Windows-x64
           path: Steam-Emulator-Setup-Windows-x64.zip
           retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Steam-Emulator-Setup-Windows-x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
