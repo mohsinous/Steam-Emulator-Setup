@@ -1,0 +1,68 @@
+name: Build Steam Emulator Setup
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "Steam Emulator Setup" `
+            main.py
+
+      - name: Copy required folders
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "release"
+
+          Copy-Item "dist\Steam Emulator Setup.exe" `
+                    "release\Steam Emulator Setup.exe"
+
+          if (Test-Path "01_STEP") {
+              Copy-Item "01_STEP" "release\01_STEP" -Recurse
+          }
+
+          if (Test-Path "02_STEP") {
+              Copy-Item "02_STEP" "release\02_STEP" -Recurse
+          }
+
+          if (Test-Path "03_STEP") {
+              Copy-Item "03_STEP" "release\03_STEP" -Recurse
+          }
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "release\*" `
+            -DestinationPath "Steam-Emulator-Setup-Windows-x64.zip"
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Steam-Emulator-Setup-Windows-x64
+          path: Steam-Emulator-Setup-Windows-x64.zip
