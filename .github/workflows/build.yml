@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+
+    tags:
+      - "v*"
+
   workflow_dispatch:
 
 jobs:
@@ -34,35 +38,54 @@ jobs:
             --name "Steam Emulator Setup" `
             main.py
 
-      - name: Copy required folders
+      - name: Prepare release folder
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "release"
 
-          Copy-Item "dist\Steam Emulator Setup.exe" `
-                    "release\Steam Emulator Setup.exe"
+          Copy-Item `
+            "dist\Steam Emulator Setup.exe" `
+            "release\Steam Emulator Setup.exe"
 
           if (Test-Path "01_STEP") {
-              Copy-Item "01_STEP" "release\01_STEP" -Recurse
+              Copy-Item `
+                "01_STEP" `
+                "release\01_STEP" `
+                -Recurse
           }
 
           if (Test-Path "02_STEP") {
-              Copy-Item "02_STEP" "release\02_STEP" -Recurse
+              Copy-Item `
+                "02_STEP" `
+                "release\02_STEP" `
+                -Recurse
           }
 
           if (Test-Path "03_STEP") {
-              Copy-Item "03_STEP" "release\03_STEP" -Recurse
+              Copy-Item `
+                "03_STEP" `
+                "release\03_STEP" `
+                -Recurse
           }
 
-      - name: Create ZIP
+      - name: Create release ZIP
         shell: pwsh
         run: |
           Compress-Archive `
             -Path "release\*" `
             -DestinationPath "Steam-Emulator-Setup-Windows-x64.zip"
 
-      - name: Upload Windows build
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: Steam-Emulator-Setup-Windows-x64
           path: Steam-Emulator-Setup-Windows-x64.zip
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Steam-Emulator-Setup-Windows-x64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
