@@ -8,6 +8,7 @@ from pathlib import Path
 import urllib.request
 import urllib.parse
 import re
+import difflib
 import webbrowser
 from io import BytesIO
 
@@ -32,6 +33,115 @@ DARK_BLUE = "#132a5e"
 # ============================================================
 # APPLICATION
 # ============================================================
+
+
+class ExeSelectionDialog(tk.Toplevel):
+    """Separate window that lets the user choose the desired game executable."""
+    def __init__(self, parent, matches):
+        super().__init__(parent)
+        self.title("Select Game Executable")
+        self.geometry("900x500")
+        self.minsize(700, 380)
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(True, True)
+
+        self.selected_path = None
+
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            self,
+            text="Select Game Executable",
+            font=("Segoe UI", 14, "bold")
+        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
+
+        frame = ttk.Frame(self)
+        frame.grid(row=1, column=0, padx=16, pady=8, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        self.tree = ttk.Treeview(
+            frame,
+            columns=("name", "similarity", "path"),
+            show="headings",
+            selectmode="browse"
+        )
+        self.tree.heading("name", text="Executable")
+        self.tree.heading("similarity", text="Similarity")
+        self.tree.heading("path", text="Full Path")
+
+        self.tree.column("name", width=240, anchor="w")
+        self.tree.column("similarity", width=100, anchor="center")
+        self.tree.column("path", width=500, anchor="w")
+
+        scrollbar = ttk.Scrollbar(
+            frame,
+            orient="vertical",
+            command=self.tree.yview
+        )
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        for score, path in matches:
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    Path(path).name,
+                    f"{score * 100:.0f}%",
+                    str(path)
+                )
+            )
+
+        self.tree.bind("<Double-Button-1>", lambda event: self.choose())
+
+        children = self.tree.get_children()
+        if children:
+            self.tree.selection_set(children[0])
+            self.tree.focus(children[0])
+
+        button_frame = ttk.Frame(self)
+        button_frame.grid(
+            row=2,
+            column=0,
+            padx=16,
+            pady=(8, 16),
+            sticky="e"
+        )
+
+        ttk.Button(
+            button_frame,
+            text="Cancel",
+            command=self.destroy
+        ).pack(side="right", padx=(8, 0))
+
+        ttk.Button(
+            button_frame,
+            text="Use Selected",
+            command=self.choose
+        ).pack(side="right")
+
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def choose(self):
+        selection = self.tree.selection()
+
+        if not selection:
+            messagebox.showwarning(
+                "Select Game",
+                "Please select a game executable.",
+                parent=self
+            )
+            return
+
+        values = self.tree.item(selection[0], "values")
+        self.selected_path = Path(values[2])
+        self.destroy()
+
 
 class SteamAppIDFinder:
 
@@ -481,6 +591,7 @@ class SteamAppIDFinder:
         # Workflow state
         self.selected_folder = None
         self.steam_api64_paths = []
+        self.likely_exe_matches = []
         self.workflow_running = False
         self.workflow_step = None
 
@@ -1274,6 +1385,25 @@ class SteamAppIDFinder:
 
         self.selected_folder = Path(folder)
         self.log(f"Game folder selected: {self.selected_folder}")
+
+        # Search recursively for EXEs whose names are similar to the
+        # selected folder name, and show every likely match in the log.
+        self.likely_exe_matches = self.find_likely_executables(self.selected_folder)
+        self.selected_game_exe = self.show_likely_executables(
+            self.likely_exe_matches,
+            self.selected_folder
+        )
+
+        if not self.selected_game_exe:
+            self.log("Workflow stopped because no game executable was selected.")
+            self.workflow_running = False
+            self.workflow_step = None
+            self.stop_loading()
+            self.status_label.config(
+                text="Game executable selection cancelled."
+            )
+            return
+
         self.log("Step 3/5: searching recursively for steam_api64.dll")
         self.steam_api64_paths = []
         self.workflow_step = 3
@@ -1285,6 +1415,70 @@ class SteamAppIDFinder:
             args=(self.selected_folder,),
             daemon=True
         ).start()
+
+    def _normalize_exe_name(self, name):
+        """Normalize a folder/EXE name for similarity matching."""
+        value = Path(name).stem if str(name).lower().endswith(".exe") else str(name)
+        return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+    def find_likely_executables(self, folder):
+        """Recursively find EXEs similar to the selected folder name."""
+        target = self._normalize_exe_name(folder.name)
+        candidates = []
+        if not target:
+            return candidates
+
+        for root, dirs, files in os.walk(folder, topdown=True, onerror=lambda error: None):
+            for filename in files:
+                if not filename.lower().endswith(".exe"):
+                    continue
+                exe_path = Path(root) / filename
+                exe_name = self._normalize_exe_name(filename)
+                if not exe_name:
+                    continue
+
+                ratio = difflib.SequenceMatcher(None, target, exe_name).ratio()
+                contains = target in exe_name or exe_name in target
+
+                target_tokens = set(re.findall(r"[a-z0-9]+", folder.name.lower()))
+                exe_tokens = set(re.findall(r"[a-z0-9]+", Path(filename).stem.lower()))
+                token_score = len(target_tokens & exe_tokens) / max(1, len(target_tokens | exe_tokens))
+
+                score = max(ratio, token_score, 0.90 if contains else 0.0)
+                if score >= 0.45:
+                    candidates.append((score, exe_path))
+
+        candidates.sort(key=lambda item: (-item[0], str(item[1]).lower()))
+        return candidates
+
+    def show_likely_executables(self, matches, folder):
+        """Show all likely EXE matches in a separate selection window."""
+        self.log(
+            f"Searching recursively for EXE files similar to: {folder.name}"
+        )
+
+        if not matches:
+            self.log("No likely EXE matches were found.")
+            self.selected_game_exe = None
+            return None
+
+        self.log(f"Found {len(matches)} likely EXE match(es).")
+        self.log("Opening game executable selection window...")
+
+        dialog = ExeSelectionDialog(self.root, matches)
+        self.root.wait_window(dialog)
+
+        self.selected_game_exe = dialog.selected_path
+
+        if self.selected_game_exe:
+            self.log(
+                f"Selected game executable: {self.selected_game_exe}"
+            )
+        else:
+            self.log("Game executable selection cancelled.")
+
+        return self.selected_game_exe
+
 
     def find_steam_api64(self, folder):
         found = []
@@ -1532,7 +1726,9 @@ class SteamAppIDFinder:
             # The final deployment must happen in the exact directory that
             # contained the steam_api64.dll found during the recursive search.
             dll_folder = original_dll.parent
-            backup_dll = dll_folder / "steam_api64.orig"
+            # Permanent backup name. Once created, this file belongs to the user
+            # and this application must never delete, replace, or rename it.
+            backup_dll = dll_folder / "steam_api64.ORIG"
 
             if not game_folder or not game_folder.is_dir():
                 raise FileNotFoundError(
@@ -1549,23 +1745,32 @@ class SteamAppIDFinder:
                     "The generated AppID output folder was not found:\n" + str(output_appid)
                 )
 
-            # Remove an older backup if one already exists, then rename the
-            # original DLL so the generated steam_api64.dll can be deployed.
+            # Protect the original backup permanently. If it already exists,
+            # NEVER delete it, replace it, or rename it on later runs.
             if backup_dll.exists():
-                if backup_dll.is_file() or backup_dll.is_symlink():
-                    backup_dll.unlink()
-                elif backup_dll.is_dir():
-                    shutil.rmtree(backup_dll)
-                self.log(f"Removed existing backup: {backup_dll}")
-
-            original_dll.rename(backup_dll)
-            self.log(f"Renamed original DLL: {original_dll} -> {backup_dll}")
+                if not backup_dll.is_file():
+                    raise RuntimeError(
+                        f"The protected backup path exists but is not a file:\n{backup_dll}"
+                    )
+                self.log(f"Protected original backup already exists: {backup_dll}")
+                self.log("The existing .ORIG file will NOT be replaced or renamed.")
+            else:
+                original_dll.rename(backup_dll)
+                self.log(f"Renamed original DLL: {original_dll} -> {backup_dll}")
+                self.log("The .ORIG backup is now protected from future replacement or rename by this app.")
 
             # Copy everything generated for this AppID into the exact folder
             # that contained the original steam_api64.dll. Existing files are
             # overwritten and existing directories are merged.
             for item in output_appid.iterdir():
                 destination = dll_folder / item.name
+
+                # Never allow the deployment phase to touch the protected
+                # steam_api64.ORIG backup, even if a future output package
+                # happens to contain a file with that name.
+                if destination.name.lower() == "steam_api64.orig":
+                    self.log(f"Skipped protected file: {destination}")
+                    continue
 
                 if item.is_dir():
                     shutil.copytree(item, destination, dirs_exist_ok=True)
