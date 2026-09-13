@@ -99,5 +99,6 @@ jobs:
           files: |
             Steam-Emulator-Setup-Windows-x64.zip
           generate_release_notes: true
+          allow_updates: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
