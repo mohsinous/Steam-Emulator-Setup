@@ -8,7 +8,6 @@ from pathlib import Path
 import urllib.request
 import urllib.parse
 import re
-import difflib
 import webbrowser
 from io import BytesIO
 
@@ -31,117 +30,51 @@ DARK_BLUE = "#132a5e"
 
 
 # ============================================================
-# APPLICATION
+# PRICE STRIPPING
 # ============================================================
 
+# Steam's autocomplete returns the price appended directly to the
+# game name, e.g. "Onimusha: Way of the Sword$69.99". This regex
+# removes any trailing price token (currency symbol / Free / Free
+# To Play / etc.) so only the clean game name remains.
+_PRICE_SUFFIX_RE = re.compile(
+    r"\s*"
+    r"(?:"
+    r"[$€£¥₩₹]\s?\d[\d.,]*"          # $69.99  €19,99  £9.99
+    r"|"
+    r"\d[\d.,]*\s?[$€£¥₩₹]"          # 69,99€  19.99$
+    r"|"
+    r"\d[\d.,]*\s?(?:USD|EUR|GBP|RUB|BRL|JPY|CNY|KRW|INR)"  # 69.99 USD
+    r"|"
+    r"Free To Play"
+    r"|"
+    r"Free"
+    r")"
+    r"\s*$",
+    re.IGNORECASE
+)
 
-class ExeSelectionDialog(tk.Toplevel):
-    """Separate window that lets the user choose the desired game executable."""
-    def __init__(self, parent, matches):
-        super().__init__(parent)
-        self.title("Select Game Executable")
-        self.geometry("900x500")
-        self.minsize(700, 380)
-        self.transient(parent)
-        self.grab_set()
-        self.resizable(True, True)
 
-        self.selected_path = None
+def strip_price(name):
+    """Remove a trailing price token from a Steam autocomplete name."""
+    if not name:
+        return name
 
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+    # Strip repeatedly in case Steam returns something like
+    # "Game$9.99 Free" or similar.
+    cleaned = name
+    for _ in range(3):
+        new_cleaned = _PRICE_SUFFIX_RE.sub("", cleaned).strip()
+        if new_cleaned == cleaned:
+            break
+        cleaned = new_cleaned
 
-        ttk.Label(
-            self,
-            text="Select Game Executable",
-            font=("Segoe UI", 14, "bold")
-        ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
+    return cleaned
 
-        frame = ttk.Frame(self)
-        frame.grid(row=1, column=0, padx=16, pady=8, sticky="nsew")
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(0, weight=1)
 
-        self.tree = ttk.Treeview(
-            frame,
-            columns=("name", "similarity", "path"),
-            show="headings",
-            selectmode="browse"
-        )
-        self.tree.heading("name", text="Executable")
-        self.tree.heading("similarity", text="Similarity")
-        self.tree.heading("path", text="Full Path")
-
-        self.tree.column("name", width=240, anchor="w")
-        self.tree.column("similarity", width=100, anchor="center")
-        self.tree.column("path", width=500, anchor="w")
-
-        scrollbar = ttk.Scrollbar(
-            frame,
-            orient="vertical",
-            command=self.tree.yview
-        )
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        for score, path in matches:
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    Path(path).name,
-                    f"{score * 100:.0f}%",
-                    str(path)
-                )
-            )
-
-        self.tree.bind("<Double-Button-1>", lambda event: self.choose())
-
-        children = self.tree.get_children()
-        if children:
-            self.tree.selection_set(children[0])
-            self.tree.focus(children[0])
-
-        button_frame = ttk.Frame(self)
-        button_frame.grid(
-            row=2,
-            column=0,
-            padx=16,
-            pady=(8, 16),
-            sticky="e"
-        )
-
-        ttk.Button(
-            button_frame,
-            text="Cancel",
-            command=self.destroy
-        ).pack(side="right", padx=(8, 0))
-
-        ttk.Button(
-            button_frame,
-            text="Use Selected",
-            command=self.choose
-        ).pack(side="right")
-
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
-
-    def choose(self):
-        selection = self.tree.selection()
-
-        if not selection:
-            messagebox.showwarning(
-                "Select Game",
-                "Please select a game executable.",
-                parent=self
-            )
-            return
-
-        values = self.tree.item(selection[0], "values")
-        self.selected_path = Path(values[2])
-        self.destroy()
-
+# ============================================================
+# APPLICATION
+# ============================================================
 
 class SteamAppIDFinder:
 
@@ -151,14 +84,25 @@ class SteamAppIDFinder:
 
         self.root.title("Steam Emulator Setup")
 
-        # Initial window size
-        # Compact layout designed to fit comfortably on a 1080p display.
-        self.root.geometry("820x980")
+        # Fixed window size.
+        win_w = 820
+        win_h = 940
 
-        # Minimum size
-        self.root.minsize(700, 700)
+        self.root.geometry(f"{win_w}x{win_h}")
+        self.root.minsize(720, 820)
 
         self.root.configure(bg=BG)
+
+        # Place the window at the top-center of the primary screen
+        # (no vertical offset, so the title bar touches y = 0).
+        self.root.update_idletasks()
+
+        screen_w = self.root.winfo_screenwidth()
+
+        x = (screen_w - win_w) // 2
+        y = 0
+
+        self.root.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
         self.current_appid = None
         self.current_game = None
@@ -167,6 +111,9 @@ class SteamAppIDFinder:
         self.banner_photo = None
 
         self.steam_icon = None
+
+        # Single fixed column width shared by every widget.
+        self.body_width = 720
 
         # ====================================================
         # TTK STYLE
@@ -189,96 +136,19 @@ class SteamAppIDFinder:
         )
 
         # ====================================================
-        # SCROLLABLE WINDOW
-        # ====================================================
-
-        self.canvas = tk.Canvas(
-            root,
-            bg=BG,
-            highlightthickness=0,
-            bd=0
-        )
-
-        self.scrollbar = tk.Scrollbar(
-            root,
-            orient="vertical",
-            command=self.canvas.yview,
-            width=12,
-            bg="#d9e8f6",
-            activebackground="#a9cbea",
-            troughcolor=BG,
-            relief="flat",
-            bd=0
-        )
-
-        self.canvas.configure(
-            yscrollcommand=self.scrollbar.set
-        )
-
-        self.canvas.pack(
-            side="left",
-            fill="both",
-            expand=True
-        )
-
-        self.scrollbar.pack(
-            side="right",
-            fill="y"
-        )
-
-        # Main content frame
-        self.main = tk.Frame(
-            self.canvas,
-            bg=BG
-        )
-
-        self.canvas_window = self.canvas.create_window(
-            (0, 0),
-            window=self.main,
-            anchor="nw"
-        )
-
-        # Update scroll region
-        self.main.bind(
-            "<Configure>",
-            self.update_scroll_region
-        )
-
-        self.canvas.bind(
-            "<Configure>",
-            self.resize_main
-        )
-
-        # Mouse wheel scrolling
-        self.canvas.bind_all(
-            "<MouseWheel>",
-            self.on_mousewheel
-        )
-
-        # Linux mouse wheel support
-        self.canvas.bind_all(
-            "<Button-4>",
-            self.on_mousewheel_linux
-        )
-
-        self.canvas.bind_all(
-            "<Button-5>",
-            self.on_mousewheel_linux
-        )
-
-        # ====================================================
-        # CONTENT PADDING
+        # CONTENT
         # ====================================================
 
         self.content = tk.Frame(
-            self.main,
+            root,
             bg=BG
         )
 
         self.content.pack(
-            fill="x",
-            padx=32,
-            pady=14
+            fill="both",
+            expand=True,
+            padx=20,
+            pady=10
         )
 
         # ====================================================
@@ -292,7 +162,7 @@ class SteamAppIDFinder:
 
         header.pack(
             fill="x",
-            pady=(0, 10)
+            pady=(0, 6)
         )
 
         title_row = tk.Frame(
@@ -320,7 +190,7 @@ class SteamAppIDFinder:
         title = tk.Label(
             title_row,
             text="Steam Emulator Setup",
-            font=("Segoe UI", 22, "bold"),
+            font=("Segoe UI", 20, "bold"),
             fg=TEXT,
             bg=BG
         )
@@ -342,17 +212,46 @@ class SteamAppIDFinder:
         )
 
         # ====================================================
-        # SEARCH
+        # BODY WRAPPER
+        # ====================================================
+
+        body_wrap = tk.Frame(
+            self.content,
+            bg=BG
+        )
+
+        body_wrap.pack(
+            fill="both",
+            expand=True
+        )
+
+        self.body = tk.Frame(
+            body_wrap,
+            bg=BG,
+            width=self.body_width,
+            height=2000
+        )
+
+        self.body.pack(
+            side="top",
+            anchor="n"
+        )
+
+        # Lock width and height so children can never resize it.
+        self.body.pack_propagate(False)
+
+        # ====================================================
+        # SEARCH (full body width; icon button inside the field)
         # ====================================================
 
         search_row = tk.Frame(
-            self.content,
+            self.body,
             bg=BG
         )
 
         search_row.pack(
             fill="x",
-            pady=(0, 12)
+            pady=(0, 6)
         )
 
         entry_frame = tk.Frame(
@@ -364,16 +263,12 @@ class SteamAppIDFinder:
         )
 
         entry_frame.pack(
-            side="left",
-            fill="x",
-            expand=True,
-            ipady=3,
-            padx=(0, 15)
+            fill="x"
         )
 
         self.search_entry = tk.Entry(
             entry_frame,
-            font=("Segoe UI", 12),
+            font=("Segoe UI", 11),
             bg=WHITE,
             fg=TEXT,
             insertbackground=TEXT,
@@ -382,16 +277,17 @@ class SteamAppIDFinder:
         )
 
         self.search_entry.pack(
+            side="left",
             fill="both",
             expand=True,
-            padx=15,
-            pady=8
+            padx=(14, 4),
+            pady=7
         )
 
         self.search_button = tk.Button(
-            search_row,
-            text="🔍  Find Games",
-            font=("Segoe UI", 10, "bold"),
+            entry_frame,
+            text="🔍",
+            font=("Segoe UI", 11, "bold"),
             fg=WHITE,
             bg=BLUE,
             activeforeground=WHITE,
@@ -399,13 +295,15 @@ class SteamAppIDFinder:
             relief="flat",
             bd=0,
             cursor="hand2",
-            padx=16,
-            pady=8,
+            padx=12,
+            pady=4,
             command=self.search_games
         )
 
         self.search_button.pack(
-            side="right"
+            side="right",
+            padx=(0, 4),
+            pady=4
         )
 
         self.search_entry.bind(
@@ -414,13 +312,13 @@ class SteamAppIDFinder:
         )
 
         # ====================================================
-        # SEARCH RESULTS TITLE
+        # SEARCH RESULTS
         # ====================================================
 
         results_title = tk.Label(
-            self.content,
+            self.body,
             text="Search Results",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg=TEXT,
             bg=BG,
             anchor="w"
@@ -428,15 +326,11 @@ class SteamAppIDFinder:
 
         results_title.pack(
             fill="x",
-            pady=(0, 5)
+            pady=(0, 3)
         )
 
-        # ====================================================
-        # RESULTS BOX
-        # ====================================================
-
         results_frame = tk.Frame(
-            self.content,
+            self.body,
             bg=WHITE,
             highlightbackground="#72b8f2",
             highlightthickness=1
@@ -449,7 +343,7 @@ class SteamAppIDFinder:
         self.search_results = tk.Listbox(
             results_frame,
             font=("Segoe UI", 10),
-            height=5,
+            height=4,
             bg=WHITE,
             fg=TEXT,
             selectbackground=BLUE,
@@ -493,56 +387,38 @@ class SteamAppIDFinder:
         )
 
         # ====================================================
-        # SELECT GAME
+        # BANNER PLACEHOLDER
         # ====================================================
 
-        self.select_button = tk.Button(
-            self.content,
-            text="Select Game",
-            font=("Segoe UI", 10, "bold"),
-            fg=TEXT,
-            bg=WHITE,
-            activebackground=LIGHT_BLUE,
-            activeforeground=TEXT,
-            relief="solid",
-            bd=1,
-            highlightbackground="#70b8f2",
-            cursor="hand2",
-            padx=45,
-            pady=7,
-            command=self.select_game
-        )
-
-        self.select_button.pack(
-            pady=(9, 10)
-        )
+        self.banner_frame = None
+        self.banner_label = None
 
         # ====================================================
-        # COMPLETE WORKFLOW LOG
+        # ACTIVITY LOG
         # ====================================================
 
-        log_title = tk.Label(
-            self.content,
+        self.log_title = tk.Label(
+            self.body,
             text="Activity Log",
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 12, "bold"),
             fg=TEXT,
             bg=BG,
             anchor="w"
         )
-        log_title.pack(
+        self.log_title.pack(
             fill="x",
-            pady=(0, 5)
+            pady=(0, 3)
         )
 
         log_frame = tk.Frame(
-            self.content,
+            self.body,
             bg=WHITE,
             highlightbackground=BORDER,
             highlightthickness=1
         )
         log_frame.pack(
             fill="x",
-            pady=(0, 10)
+            pady=(0, 8)
         )
 
         log_scrollbar = tk.Scrollbar(
@@ -554,7 +430,7 @@ class SteamAppIDFinder:
 
         self.log_text = tk.Text(
             log_frame,
-            height=8,
+            height=4,
             font=("Consolas", 8),
             bg="#f8fbff",
             fg=TEXT,
@@ -572,7 +448,7 @@ class SteamAppIDFinder:
             fill="both",
             expand=True,
             padx=8,
-            pady=8
+            pady=6
         )
         log_scrollbar.pack(
             side="right",
@@ -582,33 +458,20 @@ class SteamAppIDFinder:
         self.log("Application ready.")
 
         # ====================================================
-        # BANNER
-        # ====================================================
-
-        self.banner_frame = None
-        self.banner_label = None
-
-        # Workflow state
-        self.selected_folder = None
-        self.steam_api64_paths = []
-        self.likely_exe_matches = []
-        self.workflow_running = False
-        self.workflow_step = None
-
-        # ====================================================
         # WORKFLOW STATE
         # ====================================================
 
-        # The workflow is automatic after AppID selection.
-        # Step 2 opens the game-folder picker automatically, so no
-        # separate folder path box or Choose Game Folder button is needed.
+        self.selected_folder = None
+        self.steam_api64_paths = []
+        self.workflow_running = False
+        self.workflow_step = None
 
         # ====================================================
         # INFORMATION CARD
         # ====================================================
 
         self.info_card = tk.Frame(
-            self.content,
+            self.body,
             bg=LIGHT_BLUE,
             highlightbackground=BORDER,
             highlightthickness=1
@@ -616,7 +479,7 @@ class SteamAppIDFinder:
 
         self.info_card.pack(
             fill="x",
-            pady=(0, 10)
+            pady=(0, 6)
         )
 
         info_inner = tk.Frame(
@@ -627,13 +490,10 @@ class SteamAppIDFinder:
         info_inner.pack(
             fill="x",
             padx=18,
-            pady=9
+            pady=7
         )
 
-        # ----------------------------------------------------
-        # Game
-        # ----------------------------------------------------
-
+        # Game row
         game_row = tk.Frame(
             info_inner,
             bg=LIGHT_BLUE
@@ -641,7 +501,7 @@ class SteamAppIDFinder:
 
         game_row.pack(
             fill="x",
-            pady=(0, 5)
+            pady=(0, 3)
         )
 
         tk.Label(
@@ -669,10 +529,7 @@ class SteamAppIDFinder:
             side="left"
         )
 
-        # ----------------------------------------------------
-        # AppID
-        # ----------------------------------------------------
-
+        # AppID row
         appid_row = tk.Frame(
             info_inner,
             bg=LIGHT_BLUE
@@ -712,13 +569,13 @@ class SteamAppIDFinder:
         # ====================================================
 
         action_row = tk.Frame(
-            self.content,
+            self.body,
             bg=BG
         )
 
         action_row.pack(
             fill="x",
-            pady=(0, 9)
+            pady=(0, 6)
         )
 
         self.copy_button = tk.Button(
@@ -733,7 +590,7 @@ class SteamAppIDFinder:
             bd=1,
             highlightbackground="#70b8f2",
             cursor="hand2",
-            pady=7,
+            pady=6,
             command=self.copy_appid
         )
 
@@ -756,7 +613,7 @@ class SteamAppIDFinder:
             bd=1,
             highlightbackground="#70b8f2",
             cursor="hand2",
-            pady=7,
+            pady=6,
             command=self.open_steamdb
         )
 
@@ -772,14 +629,14 @@ class SteamAppIDFinder:
         # ====================================================
 
         separator = tk.Frame(
-            self.content,
+            self.body,
             bg=BORDER,
             height=1
         )
 
         separator.pack(
             fill="x",
-            pady=(0, 9)
+            pady=(0, 5)
         )
 
         # ====================================================
@@ -787,7 +644,7 @@ class SteamAppIDFinder:
         # ====================================================
 
         self.progress_bar = ttk.Progressbar(
-            self.content,
+            self.body,
             mode="indeterminate",
             style="Steam.Horizontal.TProgressbar"
         )
@@ -797,7 +654,7 @@ class SteamAppIDFinder:
         # ====================================================
 
         self.status_label = tk.Label(
-            self.content,
+            self.body,
             text="Ready",
             font=("Segoe UI", 10),
             fg=TEXT_LIGHT,
@@ -805,16 +662,12 @@ class SteamAppIDFinder:
         )
 
         self.status_label.pack(
-            pady=(0, 9)
+            pady=(0, 2)
         )
 
         # ====================================================
         # INITIAL STATE
         # ====================================================
-
-        self.select_button.config(
-            state="disabled"
-        )
 
         self.copy_button.config(
             state="disabled"
@@ -822,15 +675,6 @@ class SteamAppIDFinder:
 
         self.steamdb_button.config(
             state="disabled"
-        )
-
-        # ====================================================
-        # INITIAL SCROLL UPDATE
-        # ====================================================
-
-        self.root.after(
-            100,
-            self.update_scroll_region
         )
 
     # ========================================================
@@ -849,7 +693,6 @@ class SteamAppIDFinder:
             self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
             self.log_text.see(tk.END)
             self.log_text.config(state="disabled")
-            self.update_scroll_region()
 
         if threading.current_thread() is threading.main_thread():
             append_log()
@@ -869,61 +712,6 @@ class SteamAppIDFinder:
             self.log(f"{label} stderr:")
             for line in stderr.rstrip().splitlines():
                 self.log("  " + line)
-
-    # ========================================================
-    # SCROLL REGION
-    # ========================================================
-
-    def update_scroll_region(self, event=None):
-
-        self.canvas.configure(
-            scrollregion=self.canvas.bbox("all")
-        )
-
-    # ========================================================
-    # RESIZE CONTENT
-    # ========================================================
-
-    def resize_main(self, event):
-
-        self.canvas.itemconfig(
-            self.canvas_window,
-            width=event.width
-        )
-
-        if self.banner_image is not None:
-            self.root.after_idle(
-                self.update_banner
-            )
-
-    # ========================================================
-    # MOUSE WHEEL
-    # ========================================================
-
-    def on_mousewheel(self, event):
-
-        self.canvas.yview_scroll(
-            int(-1 * (event.delta / 120)),
-            "units"
-        )
-
-    # ========================================================
-    # LINUX MOUSE WHEEL
-    # ========================================================
-
-    def on_mousewheel_linux(self, event):
-
-        if event.num == 4:
-            self.canvas.yview_scroll(
-                -1,
-                "units"
-            )
-
-        elif event.num == 5:
-            self.canvas.yview_scroll(
-                1,
-                "units"
-            )
 
     # ========================================================
     # STEAM ICON
@@ -956,7 +744,7 @@ class SteamAppIDFinder:
             ).convert("RGBA")
 
             image = image.resize(
-                (78, 78),
+                (64, 64),
                 Image.Resampling.LANCZOS
             )
 
@@ -980,12 +768,10 @@ class SteamAppIDFinder:
 
         self.progress_bar.pack(
             fill="x",
-            pady=(0, 5)
+            pady=(0, 4)
         )
 
         self.progress_bar.start(10)
-
-        self.update_scroll_region()
 
     # ========================================================
     # STOP LOADING
@@ -996,8 +782,6 @@ class SteamAppIDFinder:
         self.progress_bar.stop()
 
         self.progress_bar.pack_forget()
-
-        self.update_scroll_region()
 
     # ========================================================
     # SEARCH
@@ -1017,10 +801,6 @@ class SteamAppIDFinder:
             return
 
         self.search_button.config(
-            state="disabled"
-        )
-
-        self.select_button.config(
             state="disabled"
         )
 
@@ -1132,6 +912,10 @@ class SteamAppIDFinder:
                     .replace("&quot;", '"')
                 )
 
+                # Strip any trailing price token from the name so
+                # the search result shows only the game title.
+                name = strip_price(name)
+
                 if appid.isdigit() and name:
 
                     result = (
@@ -1193,15 +977,9 @@ class SteamAppIDFinder:
                 f"{name}   [AppID: {appid}]"
             )
 
-        self.select_button.config(
-            state="normal"
-        )
-
         self.status_label.config(
-            text=f"{len(results)} game(s) found."
+            text=f"{len(results)} game(s) found. Double-click a result to select."
         )
-
-        self.update_scroll_region()
 
     # ========================================================
     # SEARCH FAILED
@@ -1360,9 +1138,7 @@ class SteamAppIDFinder:
             text="Step 2/5 - Configuration generated and info folder deleted."
         )
         self.stop_loading()
-        self.update_scroll_region()
 
-        # Open the folder picker automatically after Step 2.
         self.root.after(250, self.choose_folder)
 
     # ========================================================
@@ -1385,25 +1161,6 @@ class SteamAppIDFinder:
 
         self.selected_folder = Path(folder)
         self.log(f"Game folder selected: {self.selected_folder}")
-
-        # Search recursively for EXEs whose names are similar to the
-        # selected folder name, and show every likely match in the log.
-        self.likely_exe_matches = self.find_likely_executables(self.selected_folder)
-        self.selected_game_exe = self.show_likely_executables(
-            self.likely_exe_matches,
-            self.selected_folder
-        )
-
-        if not self.selected_game_exe:
-            self.log("Workflow stopped because no game executable was selected.")
-            self.workflow_running = False
-            self.workflow_step = None
-            self.stop_loading()
-            self.status_label.config(
-                text="Game executable selection cancelled."
-            )
-            return
-
         self.log("Step 3/5: searching recursively for steam_api64.dll")
         self.steam_api64_paths = []
         self.workflow_step = 3
@@ -1415,70 +1172,6 @@ class SteamAppIDFinder:
             args=(self.selected_folder,),
             daemon=True
         ).start()
-
-    def _normalize_exe_name(self, name):
-        """Normalize a folder/EXE name for similarity matching."""
-        value = Path(name).stem if str(name).lower().endswith(".exe") else str(name)
-        return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-    def find_likely_executables(self, folder):
-        """Recursively find EXEs similar to the selected folder name."""
-        target = self._normalize_exe_name(folder.name)
-        candidates = []
-        if not target:
-            return candidates
-
-        for root, dirs, files in os.walk(folder, topdown=True, onerror=lambda error: None):
-            for filename in files:
-                if not filename.lower().endswith(".exe"):
-                    continue
-                exe_path = Path(root) / filename
-                exe_name = self._normalize_exe_name(filename)
-                if not exe_name:
-                    continue
-
-                ratio = difflib.SequenceMatcher(None, target, exe_name).ratio()
-                contains = target in exe_name or exe_name in target
-
-                target_tokens = set(re.findall(r"[a-z0-9]+", folder.name.lower()))
-                exe_tokens = set(re.findall(r"[a-z0-9]+", Path(filename).stem.lower()))
-                token_score = len(target_tokens & exe_tokens) / max(1, len(target_tokens | exe_tokens))
-
-                score = max(ratio, token_score, 0.90 if contains else 0.0)
-                if score >= 0.45:
-                    candidates.append((score, exe_path))
-
-        candidates.sort(key=lambda item: (-item[0], str(item[1]).lower()))
-        return candidates
-
-    def show_likely_executables(self, matches, folder):
-        """Show all likely EXE matches in a separate selection window."""
-        self.log(
-            f"Searching recursively for EXE files similar to: {folder.name}"
-        )
-
-        if not matches:
-            self.log("No likely EXE matches were found.")
-            self.selected_game_exe = None
-            return None
-
-        self.log(f"Found {len(matches)} likely EXE match(es).")
-        self.log("Opening game executable selection window...")
-
-        dialog = ExeSelectionDialog(self.root, matches)
-        self.root.wait_window(dialog)
-
-        self.selected_game_exe = dialog.selected_path
-
-        if self.selected_game_exe:
-            self.log(
-                f"Selected game executable: {self.selected_game_exe}"
-            )
-        else:
-            self.log("Game executable selection cancelled.")
-
-        return self.selected_game_exe
-
 
     def find_steam_api64(self, folder):
         found = []
@@ -1511,7 +1204,6 @@ class SteamAppIDFinder:
             self.status_label.config(
                 text="Step 3 failed - steam_api64.dll not found."
             )
-            self.update_scroll_region()
             self.root.after(500, self.choose_folder)
             return
 
@@ -1519,7 +1211,6 @@ class SteamAppIDFinder:
             self.status_label.config(
                 text="Step 3 requires exactly one steam_api64.dll."
             )
-            self.update_scroll_region()
             self.root.after(500, self.choose_folder)
             return
 
@@ -1527,7 +1218,6 @@ class SteamAppIDFinder:
         self.status_label.config(
             text="Step 3 complete - steam_api64.dll found."
         )
-        self.update_scroll_region()
 
         self.root.after(250, self.start_step4)
 
@@ -1538,7 +1228,6 @@ class SteamAppIDFinder:
             "Folder Search Error",
             "Unable to search the selected folder.\n\n" + error
         )
-        self.update_scroll_region()
 
     # ========================================================
     # STEP 4 - GENERATE AND COPY STEAM INTERFACES
@@ -1574,7 +1263,6 @@ class SteamAppIDFinder:
                     f"generate_interfaces_x64.exe was not found in:\n{generator}"
                 )
 
-            # Remove stale temporary files so the output can be verified reliably.
             for path in (temp_dll, temp_interfaces):
                 if path.exists():
                     if path.is_file() or path.is_symlink():
@@ -1623,7 +1311,6 @@ class SteamAppIDFinder:
             shutil.copy2(temp_interfaces, settings_folder / "steam_interfaces.txt")
             self.log(f"Copied steam_interfaces.txt to: {settings_folder / 'steam_interfaces.txt'}")
 
-            # 02_STEP is only a temporary working area.
             if temp_dll.exists():
                 temp_dll.unlink()
             if temp_interfaces.exists():
@@ -1642,7 +1329,6 @@ class SteamAppIDFinder:
         self.status_label.config(
             text="Step 4/5 complete - steam_interfaces.txt copied and 02_STEP cleaned."
         )
-        self.update_scroll_region()
         self.root.after(250, self.start_step5)
 
     # ========================================================
@@ -1682,7 +1368,6 @@ class SteamAppIDFinder:
 
             output_appid.mkdir(parents=True, exist_ok=True)
 
-            # Overwrite existing files and merge the steam_settings folder.
             shutil.copy2(source_dll, destination_dll)
             self.log(f"Copied final DLL: {source_dll} -> {destination_dll}")
             shutil.copytree(
@@ -1723,12 +1408,8 @@ class SteamAppIDFinder:
             _, _, _, output_appid, _ = self.get_workflow_paths(appid)
             game_folder = self.selected_folder
             original_dll = self.steam_api64_paths[0]
-            # The final deployment must happen in the exact directory that
-            # contained the steam_api64.dll found during the recursive search.
             dll_folder = original_dll.parent
-            # Permanent backup name. Once created, this file belongs to the user
-            # and this application must never delete, replace, or rename it.
-            backup_dll = dll_folder / "steam_api64.ORIG"
+            backup_dll = dll_folder / "steam_api64.orig"
 
             if not game_folder or not game_folder.is_dir():
                 raise FileNotFoundError(
@@ -1745,32 +1426,18 @@ class SteamAppIDFinder:
                     "The generated AppID output folder was not found:\n" + str(output_appid)
                 )
 
-            # Protect the original backup permanently. If it already exists,
-            # NEVER delete it, replace it, or rename it on later runs.
             if backup_dll.exists():
-                if not backup_dll.is_file():
-                    raise RuntimeError(
-                        f"The protected backup path exists but is not a file:\n{backup_dll}"
-                    )
-                self.log(f"Protected original backup already exists: {backup_dll}")
-                self.log("The existing .ORIG file will NOT be replaced or renamed.")
-            else:
-                original_dll.rename(backup_dll)
-                self.log(f"Renamed original DLL: {original_dll} -> {backup_dll}")
-                self.log("The .ORIG backup is now protected from future replacement or rename by this app.")
+                if backup_dll.is_file() or backup_dll.is_symlink():
+                    backup_dll.unlink()
+                elif backup_dll.is_dir():
+                    shutil.rmtree(backup_dll)
+                self.log(f"Removed existing backup: {backup_dll}")
 
-            # Copy everything generated for this AppID into the exact folder
-            # that contained the original steam_api64.dll. Existing files are
-            # overwritten and existing directories are merged.
+            original_dll.rename(backup_dll)
+            self.log(f"Renamed original DLL: {original_dll} -> {backup_dll}")
+
             for item in output_appid.iterdir():
                 destination = dll_folder / item.name
-
-                # Never allow the deployment phase to touch the protected
-                # steam_api64.ORIG backup, even if a future output package
-                # happens to contain a file with that name.
-                if destination.name.lower() == "steam_api64.orig":
-                    self.log(f"Skipped protected file: {destination}")
-                    continue
 
                 if item.is_dir():
                     shutil.copytree(item, destination, dirs_exist_ok=True)
@@ -1801,8 +1468,6 @@ class SteamAppIDFinder:
         self.status_label.config(
             text="All steps completed successfully."
         )
-        self.update_scroll_region()
-
 
     def workflow_failed(self, error):
         self.log(f"WORKFLOW FAILED: {error}")
@@ -1815,7 +1480,6 @@ class SteamAppIDFinder:
             "Workflow Error",
             "The workflow could not be completed.\n\n" + error
         )
-        self.update_scroll_region()
 
     # ========================================================
     # SELECT GAME
@@ -1883,7 +1547,6 @@ class SteamAppIDFinder:
 
         self.start_workflow()
 
-        # Banner loading runs independently of the workflow.
         threading.Thread(
             target=self.download_banner,
             args=(appid,),
@@ -1947,19 +1610,17 @@ class SteamAppIDFinder:
 
             self.banner_image = image
 
-            # Create banner widgets only after a game is selected.
             if self.banner_frame is None:
 
                 self.banner_frame = tk.Frame(
-                    self.content,
+                    self.body,
                     bg=BG
                 )
 
-                # Put banner immediately before the information card.
                 self.banner_frame.pack(
                     fill="x",
-                    pady=(0, 10),
-                    before=self.info_card
+                    pady=(6, 8),
+                    before=self.log_title
                 )
 
                 self.banner_label = tk.Label(
@@ -1967,9 +1628,7 @@ class SteamAppIDFinder:
                     bg="#151515"
                 )
 
-                self.banner_label.pack(
-                    fill="x"
-                )
+                self.banner_label.pack(fill="x")
 
             self.update_banner()
 
@@ -1977,8 +1636,6 @@ class SteamAppIDFinder:
                 self.status_label.config(
                     text="Game selected successfully."
                 )
-
-            self.update_scroll_region()
 
         except Exception:
 
@@ -1996,15 +1653,8 @@ class SteamAppIDFinder:
         if self.banner_label is None:
             return
 
-        width = self.content.winfo_width()
-
-        if width < 100:
-            return
-
-        # Steam header ratio: 460 x 215
-        height = int(
-            width * 215 / 460
-        )
+        width = self.body_width
+        height = int(width * 215 / 460)
 
         image = self.banner_image.resize(
             (width, height),
@@ -2019,8 +1669,6 @@ class SteamAppIDFinder:
             image=self.banner_photo,
             text=""
         )
-
-        self.update_scroll_region()
 
     # ========================================================
     # BANNER FAILED
@@ -2037,8 +1685,6 @@ class SteamAppIDFinder:
             self.status_label.config(
                 text="Game selected, but banner unavailable."
             )
-
-        self.update_scroll_region()
 
     # ========================================================
     # COPY APPID
