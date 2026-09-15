@@ -93,6 +93,13 @@ class SteamAppIDFinder:
 
         self.root.configure(bg=BG)
 
+        # Use the custom application icon for the window/title bar.
+        # PyInstaller bundles app_icon.ico into its temporary resource directory.
+        try:
+            self.root.iconbitmap(str(self.get_resource_path("app_icon.ico")))
+        except Exception:
+            pass
+
         # Place the window at the top-center of the primary screen
         # (no vertical offset, so the title bar touches y = 0).
         self.root.update_idletasks()
@@ -714,47 +721,36 @@ class SteamAppIDFinder:
                 self.log("  " + line)
 
     # ========================================================
-    # STEAM ICON
+    # APPLICATION / HEADER ICON
     # ========================================================
 
+    def get_resource_path(self, name):
+        """Return a bundled resource or a resource next to the Python file."""
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+            return Path(sys._MEIPASS) / name
+        return Path(__file__).resolve().parent / name
+
     def load_steam_icon(self):
-
+        """Load the custom icon for the header instead of Steam's favicon."""
         try:
-
-            url = (
-                "https://store.steampowered.com/favicon.ico"
-            )
-
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0"
-                }
-            )
-
-            with urllib.request.urlopen(
-                request,
-                timeout=10
-            ) as response:
-
-                data = response.read()
-
-            image = Image.open(
-                BytesIO(data)
-            ).convert("RGBA")
-
+            icon_path = self.get_resource_path("app_icon.ico")
+            image = Image.open(icon_path).convert("RGBA")
             image = image.resize(
                 (64, 64),
                 Image.Resampling.LANCZOS
             )
+            self.steam_icon = ImageTk.PhotoImage(image)
 
-            self.steam_icon = ImageTk.PhotoImage(
-                image
-            )
+            # Keep the window icon identical to the header icon.
+            try:
+                self.root.iconbitmap(str(icon_path))
+            except Exception:
+                self.root.iconphoto(True, self.steam_icon)
 
-        except Exception:
-
+        except Exception as error:
             self.steam_icon = None
+            # Avoid calling self.log here if logging widgets are not initialized yet.
+            print(f"Could not load custom application icon: {error}")
 
     # ========================================================
     # START LOADING
@@ -1744,3 +1740,7 @@ if __name__ == "__main__":
     )
 
     root.mainloop()
+
+
+# PyInstaller build (Windows):
+# pyinstaller --clean --noconfirm --onefile --windowed --name "Steam Emulator Setup" --icon="app_icon.ico" --add-data "app_icon.ico;." "Steam Emulator Setup.py"
