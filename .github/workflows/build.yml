@@ -38,6 +38,7 @@ jobs:
             --onefile `
             --windowed `
             --name "Steam Emulator Setup" `
+            --icon="app_icon.ico" `
             main.py
 
       - name: Prepare package
